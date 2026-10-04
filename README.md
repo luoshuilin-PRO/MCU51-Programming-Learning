@@ -34,3 +34,8 @@ C++、Python 先用于电脑端编程练习；不默认第三方 51 板可以直
 - [龙威TPR-3005-2D电源：中文使用说明与三仪器实验](mcu51/TPR-3005-2D/README.md)
 
 2026-10-04新增；包含单路、限流、串并联、正负电源及DM40A/SDS联用。
+
+## 设备总览
+
+- [设备总清单](hardware/设备总清单.md)：新增Arduino Uno 1块，确认ESP32-S3 N16R8共2块；包含已有测试仪器入口。
+- [Arduino Uno板卡确认](hardware/Arduino-Uno.md)
