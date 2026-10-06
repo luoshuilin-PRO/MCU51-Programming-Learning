@@ -977,3 +977,379 @@ git diff
 ```
 
 **当前仍然不应直接进入颜色识别或罗技宏转换。**
+
+
+---
+
+# 12. 2026-10-06 更新：G502 侧键识别与 B 板诊断固件
+
+## 12.1 当前现象
+
+双 ESP32-S3 透传已经推进到鼠标宏测试阶段。
+
+当前硬件角色继续保持：
+
+```text
+A 板 = INPUT  = usb-input
+B 板 = OUTPUT = usb-output
+```
+
+当前已知板卡身份：
+
+```text
+A:
+COM3
+MAC = ac:a7:04:e2:7e:88
+
+B:
+COM4
+MAC = 14:c1:9f:39:f4:94
+```
+
+当前鼠标为 Logitech G502 新版。
+
+B 板串口日志已经确认：
+
+```text
+Project name: usb-keyboard-output
+Flash: 16 MB
+PSRAM: 8 MB
+usb-output started
+```
+
+启动初期出现一次：
+
+```text
+SPI HID Receive: SPI received transmission invalid with => 0; 0;
+```
+
+但后续实际鼠标操作已经能触发当前自定义宏状态，例如：
+
+```text
+macro_v1: enabled=1 mode=1 action=1
+macro_v1: enabled=1 mode=1 action=0
+
+macro_v1: enabled=1 mode=2 action=2
+macro_v1: enabled=1 mode=2 action=0
+```
+
+这说明 A → SPI → B 的鼠标事件链路至少已经部分工作。
+
+当前真正的问题不是“完全收不到鼠标”，而是：
+
+> 当前日志只打印宏逻辑解释后的 action，没有打印原始 HID mouse buttons，因此还无法确认 G502 前进 / 后退侧键实际对应哪个 bit / value。
+
+## 12.2 当前诊断目标
+
+暂时不要继续调整正式宏逻辑。
+
+先制作一个 **B 板诊断版 usb-output 固件**。
+
+诊断版与正常固件保持相同透传和宏功能，只增加鼠标原始 HID 日志：
+
+```text
+A 接真实鼠标
+    ↓
+A usb-input
+    ↓ SPI
+B usb-output
+    ↓
+打印原始 mouse report
+    ↓
+原宏逻辑
+    ↓
+USB HID Device
+```
+
+诊断目标：
+
+依次按 G502：
+
+```text
+左键
+右键
+中键
+后退侧键
+前进侧键
+滚轮
+滚轮左倾
+滚轮右倾
+DPI / 狙击键（如果这些键产生 HID 数据）
+```
+
+记录每次对应的：
+
+```text
+buttons
+x
+y
+wheel
+pan
+```
+
+重点确认前进 / 后退是否属于：
+
+```text
+0x08
+0x10
+```
+
+或者其他值。
+
+不要预设具体值，必须以实际串口日志为准。
+
+## 12.3 建议加入的诊断日志
+
+文件：
+
+```text
+usb-output/main/macpass_macro.c
+```
+
+在鼠标分支：
+
+```c
+} else if (report->header == HEADER_HID_MOUSE){
+```
+
+进入后，临时增加：
+
+```c
+ESP_LOGI("MOUSE_RAW",
+         "buttons=0x%02X x=%d y=%d wheel=%d pan=%d",
+         report->event.mouse.buttons,
+         report->event.mouse.x,
+         report->event.mouse.y,
+         report->event.mouse.wheel,
+         report->event.mouse.pan);
+```
+
+期望结构类似：
+
+```c
+} else if (report->header == HEADER_HID_MOUSE){
+
+    ESP_LOGI("MOUSE_RAW",
+             "buttons=0x%02X x=%d y=%d wheel=%d pan=%d",
+             report->event.mouse.buttons,
+             report->event.mouse.x,
+             report->event.mouse.y,
+             report->event.mouse.wheel,
+             report->event.mouse.pan);
+
+    last_mouse_report = report->event.mouse;
+```
+
+不要修改 `hid_mouse_report_t` 的结构，不要先重写宏系统。
+
+## 12.4 B 板诊断版编译与烧录
+
+项目：
+
+```text
+C:\Users\Administrator\Documents\ESP32\macroPassthrough\usb-output
+```
+
+B 板当前端口：
+
+```text
+COM4
+```
+
+编译、烧录、监视：
+
+```powershell
+idf.py build
+idf.py -p COM4 flash monitor
+```
+
+如果当前 ESP-IDF 5.4 环境可完成现有 usb-output 的 build/flash，则先使用现有环境完成诊断。
+
+如果出现构建 API 兼容问题，再切换 ESP-IDF 5.5.4。
+
+不要为了这个诊断任务重新设计整个工程。
+
+## 12.5 诊断输出解释
+
+理想情况下：
+
+```text
+无按键:
+buttons=0x00
+
+左键:
+buttons=0x01
+
+右键:
+buttons=0x02
+
+中键:
+buttons=0x04
+```
+
+标准 HID 鼠标常见：
+
+```text
+Button 4:
+0x08
+
+Button 5:
+0x10
+```
+
+但 Logitech G502 可能存在：
+
+- Report ID
+- 多 HID Interface
+- Vendor-defined HID Report
+- Consumer Control
+- Logitech 自定义接口
+
+因此侧键实际值必须现场测量。
+
+如果：
+
+```text
+左/右/中键变化
+前进/后退 buttons 完全不变化
+```
+
+则下一步转向 A 板 USB Host 原始报告抓取。
+
+## 12.6 若 B 板 buttons 看不到侧键：A 板抓 RAW HID
+
+文件：
+
+```text
+usb-input/main/macpass_usb.c
+```
+
+在：
+
+```c
+HID_HOST_INTERFACE_EVENT_INPUT_REPORT
+```
+
+收到：
+
+```c
+hid_host_device_get_raw_input_report_data(...)
+```
+
+以后打印：
+
+- data_length
+- subclass
+- proto
+- raw bytes
+
+例如临时加入：
+
+```c
+ESP_LOGI("HID_RAW",
+         "len=%u data=%02X %02X %02X %02X %02X %02X %02X %02X",
+         (unsigned)data_length,
+         data[0], data[1], data[2], data[3],
+         data[4], data[5], data[6], data[7]);
+```
+
+目的：
+
+判断 G502 侧键到底：
+
+1. A 板根本没有收到；
+2. A 板收到但固定 `hid_mouse_report_t` 解析丢失；
+3. A 收到、SPI 也发送，但 B 宏逻辑未识别。
+
+## 12.7 特别检查：Boot Protocol
+
+当前上游 `usb-input/main/macpass_usb.c` 对 Boot Interface 调用：
+
+```c
+hid_class_request_set_protocol(
+    hid_device_handle,
+    HID_REPORT_PROTOCOL_BOOT
+);
+```
+
+这可能是 G502 扩展侧键丢失的重要原因。
+
+Boot Mouse Protocol 主要面向最基础鼠标兼容。
+
+如果 RAW 测试证明：
+
+- Boot 模式下只有基础鼠标键；
+- G502 扩展侧键没有出现在当前报告；
+
+则下一阶段验证：
+
+```text
+Keyboard → BOOT protocol
+Mouse    → REPORT protocol
+```
+
+即鼠标不要强制切 Boot Protocol。
+
+但当前阶段不要直接改协议，先抓 RAW 数据确认。
+
+## 12.8 Codex 当前任务
+
+Codex 接手时应执行：
+
+```text
+1. 读取本文件第 12 节
+2. 打开 macroPassthrough 本地仓库
+3. git status / git diff，保护当前已有修改
+4. 确认 B = COM4 / MAC 14:c1:9f:39:f4:94
+5. 在 usb-output/main/macpass_macro.c 增加最小 MOUSE_RAW 日志
+6. 不修改正式宏逻辑
+7. build
+8. flash COM4
+9. monitor COM4
+10. 提示用户依次按 G502 各按键
+11. 根据输出建立 G502 按键表
+12. 确认 forward/back 实际 buttons 值
+13. 如果侧键没有出现在 buttons，则转到 A 板 RAW HID 抓包
+14. 最终只在事实明确后修复正式宏
+```
+
+## 12.9 Codex 必须输出的 G502 记录表
+
+```text
+G502 Button Map
+
+Left:
+Right:
+Middle:
+Back:
+Forward:
+Wheel Up:
+Wheel Down:
+Wheel Tilt Left:
+Wheel Tilt Right:
+DPI:
+Sniper:
+
+Report length:
+Report ID:
+Mouse buttons byte:
+Raw bytes:
+```
+
+## 12.10 当前原则
+
+当前阶段的目标不是继续增加功能，而是：
+
+> 准确测量 G502 每个实体按键进入 ESP32-S3 后的真实 HID 数据。
+
+先测量，再修复。
+
+这样可以避免错误地把：
+
+```text
+forward = 某个 action
+back = 某个 action
+```
+
+写死，而不知道真实 HID 来源。
+
